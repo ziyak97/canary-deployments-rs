@@ -5,6 +5,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::env;
 use tokio;
+use chrono;
 
 struct Releases<'a> {
     octocrab: &'a Octocrab,
@@ -284,7 +285,8 @@ async fn create_canary_release(octocrab: &Octocrab) -> octocrab::Result<()> {
     }
 
     let published_at_string = if let Some(latest_release) = &latest_release {
-        latest_release.published_at.unwrap().to_string()
+        latest_release.published_at.unwrap().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        .to_string()
     } else {
         "1970-01-01".to_string()
     };
@@ -376,7 +378,7 @@ async fn create_release(octocrab: &Octocrab) -> octocrab::Result<()> {
     let published_at_string = last_stable_release
         .map(|release| release.published_at)
         .unwrap_or_else(|| None)
-        .map(|d| d.to_rfc3339())
+        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
         .unwrap_or_else(|| "1970-01-01".to_string());
 
     let published_at = published_at_string.as_str();

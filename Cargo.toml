@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1.68"
+chrono = "0.4.26"
 octocrab = "0.25.0"
 regex = "1.8.3"
 tokio = { version = "1.28.2", features = ["full"] }
