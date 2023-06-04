@@ -82,12 +82,19 @@ async fn get_latest_release(
     owner: &str,
     repo: &str,
 ) -> octocrab::Result<Option<models::repos::Release>> {
-    let release = octocrab.repos(owner, repo).releases().get_latest().await;
+    let page = octocrab
+        .repos(owner, repo)
+        .releases()
+        .list()
+        .per_page(1)
+        .send()
+        .await?;
 
-    match release {
-        Ok(release) => Ok(Some(release)),
-        Err(_) => Ok(None),
+    if page.items.is_empty() {
+        return Ok(None);
     }
+
+    Ok(page.items.into_iter().next())
 }
 
 async fn get_merged_pull_requests(
@@ -266,37 +273,6 @@ async fn create_canary_release(octocrab: &Octocrab) -> octocrab::Result<()> {
                 }
             }
         }
-
-        let published_at_string = latest_release
-            .published_at
-            .map(|d| d.to_rfc3339())
-            .unwrap_or_else(|| "0".to_string());
-
-        let published_at = published_at_string.as_str();
-
-        // Get merged pull requests between latest release and new canary release
-        let merged_pull_requests =
-            get_merged_pull_requests(octocrab, owner, repo, published_at).await?;
-
-        // Guard clause: No merged pull requests
-        if merged_pull_requests.is_empty() {
-            println!("No merged pull requests found between latest release and new canary release");
-            return Ok(());
-        }
-
-        // Group pull requests by label
-        let (core_changes, documentation_changes, miscellaneous_changes) =
-            group_pull_requests_by_label(&merged_pull_requests);
-
-        // Generate release notes
-        release_notes.push_str(&generate_release_notes(
-            core_changes,
-            documentation_changes,
-            miscellaneous_changes,
-        ));
-
-        // Generate list of contributors
-        release_notes.push_str(&generate_contributors_list(merged_pull_requests));
     } else {
         // No releases found for repository
         match semantic_version_type.as_str() {
@@ -307,12 +283,54 @@ async fn create_canary_release(octocrab: &Octocrab) -> octocrab::Result<()> {
         }
     }
 
+    let published_at_string = if let Some(latest_release) = &latest_release {
+        latest_release.published_at.unwrap().to_string()
+    } else {
+        "1970-01-01".to_string()
+    };
+
+    let published_at = published_at_string.as_str();
+
+    // Get merged pull requests between latest release and new canary release
+    let merged_pull_requests =
+        get_merged_pull_requests(octocrab, owner, repo, published_at).await?;
+
+    // Guard clause: No merged pull requests
+    if merged_pull_requests.is_empty() {
+        println!("No merged pull requests found between latest release and new canary release");
+        return Ok(());
+    }
+
+    // Group pull requests by label
+    let (core_changes, documentation_changes, miscellaneous_changes) =
+        group_pull_requests_by_label(&merged_pull_requests);
+
+    // Generate release notes
+    release_notes.push_str(&generate_release_notes(
+        core_changes,
+        documentation_changes,
+        miscellaneous_changes,
+    ));
+
+    // Generate list of contributors
+    release_notes.push_str(&generate_contributors_list(merged_pull_requests));
+
     let name = tag_name.clone();
-    let body = format!(
-        "New canary release based on {}\n\n{}",
-        latest_release.map_or_else(|| "".to_string(), |r| r.tag_name),
-        release_notes
-    );
+
+    let latest_release_tag_name: Option<String> = latest_release
+        .map(|r| Some(r.tag_name))
+        .unwrap_or_else(|| None);
+
+    let body = if latest_release_tag_name.is_some() {
+        format!(
+            "New canary release based on {}\n\n{}",
+            latest_release_tag_name.unwrap(),
+            release_notes
+        )
+    } else {
+        format!("First release 🎉\n\n{}", release_notes)
+    };
+
     octocrab
         .repos(owner, repo)
         .releases()
@@ -343,6 +361,8 @@ async fn create_release(octocrab: &Octocrab) -> octocrab::Result<()> {
 
     let latest_canary_release = latest_canary_release.unwrap();
 
+    let lastest_canary_release_tag_name = latest_canary_release.tag_name.clone();
+
     let tag_name = latest_canary_release
         .tag_name
         .split("-canary")
@@ -353,17 +373,11 @@ async fn create_release(octocrab: &Octocrab) -> octocrab::Result<()> {
 
     let last_stable_release = get_last_stable_release(octocrab, owner, repo).await?;
 
-    if last_stable_release.is_none() {
-        println!("No stable releases found for repository");
-        return Ok(());
-    }
-
-    let last_stable_release = last_stable_release.unwrap();
-
     let published_at_string = last_stable_release
-        .published_at
+        .map(|release| release.published_at)
+        .unwrap_or_else(|| None)
         .map(|d| d.to_rfc3339())
-        .unwrap_or_else(|| "0".to_string());
+        .unwrap_or_else(|| "1970-01-01".to_string());
 
     let published_at = published_at_string.as_str();
 
@@ -387,12 +401,14 @@ async fn create_release(octocrab: &Octocrab) -> octocrab::Result<()> {
     // Generate list of contributors
     release_notes.push_str(&generate_contributors_list(merged_pull_requests));
 
+    let body = format!("New release based on {}\n\n{}", lastest_canary_release_tag_name, release_notes);
+
     octocrab
         .repos(owner, repo)
         .releases()
         .create(tag_name)
         .name(name)
-        .body(release_notes.as_str())
+        .body(body.as_str())
         .send()
         .await?;
 
