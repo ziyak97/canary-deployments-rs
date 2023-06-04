@@ -1,28 +1,76 @@
+use async_trait::async_trait;
 use octocrab::models::issues::Issue;
-use octocrab::{models, Octocrab};
+use octocrab::{models, Octocrab, Page};
+use regex::Regex;
 use std::collections::HashSet;
 use std::env;
-use regex::Regex;
 use tokio;
 
+struct Releases<'a> {
+    octocrab: &'a Octocrab,
+    page: Option<Page<models::repos::Release>>,
+}
+
+impl<'a> Releases<'a> {
+    async fn new(
+        octocrab: &'a Octocrab,
+        owner: &str,
+        repo: &str,
+    ) -> octocrab::Result<Releases<'a>> {
+        let page = octocrab
+            .repos(owner, repo)
+            .releases()
+            .list()
+            .per_page(25)
+            .send()
+            .await?;
+
+        Ok(Self {
+            octocrab,
+            page: Some(page),
+        })
+    }
+}
+
+#[async_trait]
+trait AsyncIterator {
+    type Item;
+
+    async fn next(&mut self) -> Option<Self::Item>;
+}
+
+#[async_trait]
+impl<'a> AsyncIterator for Releases<'a> {
+    type Item = Vec<models::repos::Release>;
+
+    async fn next(&mut self) -> Option<Self::Item> {
+        if let Some(mut page) = self.page.take() {
+            if let Ok(next_page) = self
+                .octocrab
+                .get_page::<models::repos::Release>(&page.next)
+                .await
+            {
+                self.page = next_page;
+            }
+
+            Some(page.take_items())
+        } else {
+            None
+        }
+    }
+}
 async fn get_last_stable_release(
     octocrab: &Octocrab,
     owner: &str,
     repo: &str,
 ) -> octocrab::Result<Option<models::repos::Release>> {
-    let mut page = octocrab
-        .repos(owner, repo)
-        .releases()
-        .list()
-        .per_page(100)
-        .send()
-        .await?;
+    let mut iterator = Releases::new(octocrab, owner, repo).await?;
 
-    let mut releases = page.take_items().into_iter();
-
-    while let Some(release) = releases.next() {
-        if !release.prerelease {
-            return Ok(Some(release));
+    while let Some(releases) = iterator.next().await {
+        for release in releases {
+            if !release.prerelease {
+                return Ok(Some(release));
+            }
         }
     }
 
@@ -68,7 +116,9 @@ async fn get_merged_pull_requests(
     Ok(response)
 }
 
-fn group_pull_requests_by_label(pull_requests: &Vec<Issue>) -> (Vec<&Issue>, Vec<&Issue>, Vec<&Issue>) {
+fn group_pull_requests_by_label(
+    pull_requests: &Vec<Issue>,
+) -> (Vec<&Issue>, Vec<&Issue>, Vec<&Issue>) {
     let mut core_changes = Vec::new();
     let mut documentation_changes = Vec::new();
     let mut miscellaneous_changes = Vec::new();
@@ -221,7 +271,7 @@ async fn create_canary_release(octocrab: &Octocrab) -> octocrab::Result<()> {
             .published_at
             .map(|d| d.to_rfc3339())
             .unwrap_or_else(|| "0".to_string());
-            
+
         let published_at = published_at_string.as_str();
 
         // Get merged pull requests between latest release and new canary release
@@ -352,13 +402,10 @@ async fn create_release(octocrab: &Octocrab) -> octocrab::Result<()> {
 #[tokio::main]
 async fn main() -> octocrab::Result<()> {
     let release_type = env::args().nth(1).unwrap();
-    let _semantic_version_type = env::args().nth(2).unwrap();
 
     let personal_token = env::var("GITHUB_TOKEN").unwrap();
 
-    let octocrab = Octocrab::builder()
-        .personal_token(personal_token)
-        .build()?;
+    let octocrab = Octocrab::builder().personal_token(personal_token).build()?;
 
     if release_type == "canary" {
         create_canary_release(&octocrab).await?;
